@@ -1,94 +1,161 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMachine } from '@xstate/react';
-import { saveProgress, loadProgress, clearProgress } from './lib/storage';
-import { gameById, games } from './games/registry';
+import { saveProgress, clearProgress } from './lib/storage';
+import { gameById } from './games/registry';
 import { stringifyState, type GameDefinition } from './games/types';
 import type { NumberHuntContext } from './games/numberHunt/machine';
 import type { SugorokuContext, SquareKind } from './games/sugoroku/machine';
-import { GmFace } from './components/GmFace';
-import { MessageWindow } from './components/MessageWindow';
+import { GmStage } from './components/GmStage';
+import { ChatPanel, type ChatAttachment, type ChatMessage } from './components/ChatPanel';
+import { ChatInput } from './components/ChatInput';
 import { ActionPanel } from './components/ActionPanel';
 import { ControlBar } from './components/ControlBar';
 import { QuestionPanel } from './components/QuestionPanel';
 import { GameBoard } from './components/GameBoard';
-import { GameSelect } from './components/GameSelect';
 import { NumberHuntBoard } from './components/NumberHuntBoard';
 import './App.css';
 
-function selectJapaneseVoice(voices: SpeechSynthesisVoice[]) {
-  const japaneseVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith('ja'));
-  const preferredNames = ['otoya', 'hattori', 'o-ren', 'oren'];
-  const namedVoice = japaneseVoices.find((voice) =>
-    preferredNames.some((name) => voice.name.toLowerCase().includes(name))
-  );
-  if (namedVoice) return namedVoice;
+const INITIAL_GREETING =
+  'こんばんは。なんでもゲームマスターです。説明書の写真を貼っていただくか、遊びたいゲーム名を教えてください。';
 
-  const maleLikeVoice = japaneseVoices.find((voice) => {
-    const name = voice.name.toLowerCase();
-    return ['male', 'man', '男性', 'otoko', 'ichiro', 'taro'].some((hint) => name.includes(hint));
-  });
-  return maleLikeVoice ?? japaneseVoices[0] ?? null;
+function createId() {
+  if ('crypto' in window && 'randomUUID' in window.crypto) {
+    return window.crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function gameIdFromText(text: string): string | null {
+  const normalized = text.replace(/\s/g, '').toLowerCase();
+  if (normalized.includes('すごろく') || normalized.includes('双六')) return 'sugoroku';
+  if (
+    normalized.includes('数字読み当て') ||
+    normalized.includes('数字読当て') ||
+    normalized.includes('numberhunt')
+  ) {
+    return 'numberHunt';
+  }
+  return null;
+}
+
+function describeAttachment(attachment: ChatAttachment) {
+  const baseName = attachment.name.replace(/\.[^.]+$/, '').trim();
+  return baseName ? `「${baseName}」` : 'お預かりした説明書';
 }
 
 export default function App() {
-  const [initialResumeGameId] = useState(() => {
-    const saved = loadProgress();
-    return saved?.gameId && gameById.has(saved.gameId) ? saved.gameId : null;
-  });
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { id: createId(), role: 'gm', text: INITIAL_GREETING },
+  ]);
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
-  const [askResume, setAskResume] = useState(Boolean(initialResumeGameId));
-  const [resumeGameId, setResumeGameId] = useState<string | null>(initialResumeGameId);
+  const [gmSpeaking, setGmSpeaking] = useState(true);
+  const [expression, setExpression] = useState<'neutral' | 'win' | 'lose'>('neutral');
+  const speechTimerRef = useRef<number | null>(null);
+  const replyTimerRef = useRef<number | null>(null);
 
-  const selectedGame = selectedGameId ? gameById.get(selectedGameId) : null;
+  const selectedGame = selectedGameId ? gameById.get(selectedGameId) ?? null : null;
+
+  const speakFor = useCallback((text: string) => {
+    if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+    setGmSpeaking(true);
+    const duration = Math.min(Math.max(text.length * 34, 1200), 4200);
+    speechTimerRef.current = window.setTimeout(() => {
+      setGmSpeaking(false);
+      speechTimerRef.current = null;
+    }, duration);
+  }, []);
+
+  const sayGm = useCallback((text: string) => {
+    if (!text) return;
+    setMessages((current) => [...current, { id: createId(), role: 'gm', text }]);
+    speakFor(text);
+  }, [speakFor]);
+
+  useEffect(() => {
+    speechTimerRef.current = window.setTimeout(() => {
+      setGmSpeaking(false);
+      speechTimerRef.current = null;
+    }, Math.min(Math.max(INITIAL_GREETING.length * 34, 1200), 4200));
+    return () => {
+      if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+      if (replyTimerRef.current) window.clearTimeout(replyTimerRef.current);
+    };
+  }, []);
+
+  const resetToOpening = useCallback(() => {
+    clearProgress();
+    setSelectedGameId(null);
+    setExpression('neutral');
+    setMessages([{ id: createId(), role: 'gm', text: INITIAL_GREETING }]);
+    speakFor(INITIAL_GREETING);
+  }, [speakFor]);
+
+  const handleSend = (text: string, attachment?: ChatAttachment) => {
+    setMessages((current) => [
+      ...current,
+      {
+        id: createId(),
+        role: 'user',
+        text: text || (attachment ? '説明書です' : ''),
+        attachment,
+      },
+    ]);
+
+    if (replyTimerRef.current) {
+      window.clearTimeout(replyTimerRef.current);
+      replyTimerRef.current = null;
+    }
+
+    if (attachment) {
+      sayGm('ありがとうございます。確認しています...');
+      replyTimerRef.current = window.setTimeout(() => {
+        sayGm(`${describeAttachment(attachment)}というゲームですね、では始めましょう。`);
+        replyTimerRef.current = null;
+      }, 1800);
+      return;
+    }
+
+    const requestedGameId = gameIdFromText(text);
+    if (requestedGameId) {
+      setExpression('neutral');
+      setSelectedGameId(requestedGameId);
+      const gameName = gameById.get(requestedGameId)?.meta.name ?? 'そのゲーム';
+      sayGm(`${gameName}ですね。準備をお伺いします。`);
+      return;
+    }
+
+    if (selectedGameId) {
+      if (text.includes('中断')) {
+        resetToOpening();
+        return;
+      }
+      sayGm('進行中です。下のアクションから操作してください。中断したい場合は「中断」と送ってください。');
+      return;
+    }
+
+    sayGm(
+      '申し訳ありません、現時点で内蔵対応しているのは『すごろく』と『数字読み当て』です。他のゲームは説明書写真からの読み取り対応を準備中です。'
+    );
+  };
 
   return (
     <div className="app">
-      {askResume && resumeGameId && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <div className="modal-title">前回のゲームを開きますか?</div>
-            <div className="modal-actions">
-              <button
-                onClick={() => {
-                  setSelectedGameId(resumeGameId);
-                  setAskResume(false);
-                }}
-              >
-                開く
-              </button>
-              <button
-                onClick={() => {
-                  clearProgress();
-                  setAskResume(false);
-                  setResumeGameId(null);
-                }}
-              >
-                開かない
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <header className="header">
-        <h1>なんでもゲームマスター</h1>
-        <div className="subtitle">
-          {selectedGame ? selectedGame.meta.name : 'ゲーム選択'}
-        </div>
-      </header>
-
-      {selectedGame ? (
-        <GamePlay
-          key={selectedGame.meta.id}
-          game={selectedGame}
-          onExit={() => {
-            clearProgress();
-            setSelectedGameId(null);
-          }}
-        />
-      ) : (
-        <GameSelect games={games.map((game) => game.meta)} onSelect={setSelectedGameId} />
-      )}
+      <GmStage speaking={gmSpeaking} expression={expression} />
+      <ChatPanel
+        messages={messages}
+        actionArea={
+          selectedGame ? (
+            <GamePlay
+              key={selectedGame.meta.id}
+              game={selectedGame}
+              onExit={resetToOpening}
+              onGmMessage={sayGm}
+              onExpressionChange={setExpression}
+            />
+          ) : null
+        }
+        inputArea={<ChatInput onSend={handleSend} />}
+      />
     </div>
   );
 }
@@ -96,20 +163,14 @@ export default function App() {
 interface GamePlayProps {
   game: GameDefinition;
   onExit: () => void;
+  onGmMessage: (message: string) => void;
+  onExpressionChange: (expression: 'neutral' | 'win' | 'lose') => void;
 }
 
-function GamePlay({ game, onExit }: GamePlayProps) {
+function GamePlay({ game, onExit, onGmMessage, onExpressionChange }: GamePlayProps) {
   const [state, send] = useMachine(game.machine);
   const [questionOpen, setQuestionOpen] = useState(false);
-  const [voiceSpeaking, setVoiceSpeaking] = useState(false);
-  const [typing, setTyping] = useState(false);
-  const [typedMessage, setTypedMessage] = useState({ source: '', text: '' });
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [voiceUnlocked, setVoiceUnlocked] = useState(false);
-  const [voiceVolume, setVoiceVolume] = useState(0.9);
-  const [voicesRevision, setVoicesRevision] = useState(0);
-  const showVoiceVolumeControl = false;
-  const speaking = voiceSpeaking || typing;
+  const lastMessageRef = useRef('');
 
   useEffect(() => {
     saveProgress({
@@ -124,84 +185,12 @@ function GamePlay({ game, onExit }: GamePlayProps) {
     () => game.messageFor(state.value, state.context),
     [game, state.value, state.context]
   );
-  const displayMessage = typedMessage.source === message ? typedMessage.text : '';
 
   useEffect(() => {
-    let index = 0;
-    let timer = 0;
-    const typeSpeed = voiceEnabled && voiceUnlocked ? 38 : 26;
-    const start = window.setTimeout(() => {
-      if (!message) {
-        setTyping(false);
-        return;
-      }
-
-      setTyping(true);
-      setTypedMessage({ source: message, text: '' });
-      timer = window.setInterval(() => {
-        index += 1;
-        setTypedMessage({ source: message, text: message.slice(0, index) });
-        if (index >= message.length) {
-          window.clearInterval(timer);
-          setTyping(false);
-        }
-      }, typeSpeed);
-    }, 0);
-
-    return () => {
-      window.clearTimeout(start);
-      window.clearInterval(timer);
-    };
-  }, [message, voiceEnabled, voiceUnlocked]);
-
-  useEffect(() => {
-    const unlock = () => setVoiceUnlocked(true);
-    window.addEventListener('pointerdown', unlock, { once: true });
-    window.addEventListener('keydown', unlock, { once: true });
-    return () => {
-      window.removeEventListener('pointerdown', unlock);
-      window.removeEventListener('keydown', unlock);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!('speechSynthesis' in window)) return;
-
-    const refreshVoices = () => setVoicesRevision((revision) => revision + 1);
-    refreshVoices();
-    window.speechSynthesis.addEventListener('voiceschanged', refreshVoices);
-    return () => {
-      window.speechSynthesis.removeEventListener('voiceschanged', refreshVoices);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!message || !voiceEnabled || !voiceUnlocked || !('speechSynthesis' in window)) return;
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(message);
-    const voice = selectJapaneseVoice(window.speechSynthesis.getVoices());
-    utterance.lang = 'ja-JP';
-    if (voice) utterance.voice = voice;
-    utterance.rate = 0.88;
-    utterance.pitch = 0.78;
-    utterance.volume = voiceVolume;
-    utterance.onstart = () => setVoiceSpeaking(true);
-    utterance.onend = () => setVoiceSpeaking(false);
-    utterance.onerror = () => setVoiceSpeaking(false);
-    window.speechSynthesis.speak(utterance);
-
-    return () => {
-      window.speechSynthesis.cancel();
-      setVoiceSpeaking(false);
-    };
-  }, [message, voiceEnabled, voiceUnlocked, voiceVolume, voicesRevision]);
-
-  const onCancel = () => {
-    clearProgress();
-    send({ type: 'CANCEL' } as never);
-    onExit();
-  };
+    if (!message || lastMessageRef.current === message) return;
+    lastMessageRef.current = message;
+    onGmMessage(message);
+  }, [message, onGmMessage]);
 
   const path = stringifyState(state.value);
   const isResult = path === 'win' || path === 'lose';
@@ -216,6 +205,10 @@ function GamePlay({ game, onExit }: GamePlayProps) {
         : null;
   const expression = state.matches('win') ? 'win' : state.matches('lose') ? 'lose' : 'neutral';
 
+  useEffect(() => {
+    onExpressionChange(expression);
+  }, [expression, onExpressionChange]);
+
   const onBack = () => {
     if (path === 'setupPlayers') {
       onExit();
@@ -224,37 +217,14 @@ function GamePlay({ game, onExit }: GamePlayProps) {
     send({ type: 'BACK' } as never);
   };
 
-  return (
-    <>
-      <button
-        className={`voice-toggle ${voiceEnabled ? 'active' : ''}`}
-        type="button"
-        onClick={() => {
-          if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-          setVoiceSpeaking(false);
-          setVoiceEnabled((enabled) => !enabled);
-          setVoiceUnlocked(true);
-        }}
-        aria-pressed={voiceEnabled}
-      >
-        {voiceEnabled ? '音声ON' : '音声OFF'}
-      </button>
-      {showVoiceVolumeControl && (
-        <label className="voice-volume">
-          音量
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.05"
-            value={voiceVolume}
-            onChange={(event) => setVoiceVolume(Number(event.currentTarget.value))}
-          />
-        </label>
-      )}
+  const onCancel = () => {
+    clearProgress();
+    send({ type: 'CANCEL' } as never);
+    onExit();
+  };
 
-      <GmFace speaking={speaking} expression={expression} />
-      <MessageWindow message={displayMessage} speaking={speaking} />
+  return (
+    <div className="game-action-stack">
       {isSugoroku && (
         <GameBoard
           context={state.context as SugorokuContext}
@@ -308,6 +278,6 @@ function GamePlay({ game, onExit }: GamePlayProps) {
         open={questionOpen}
         onClose={() => setQuestionOpen(false)}
       />
-    </>
+    </div>
   );
 }
