@@ -2,10 +2,12 @@ import { GmFace } from './GmFace';
 
 interface Props {
   speaking: boolean;
+  analyser: AnalyserNode | null;
+  syntheticSpeech: boolean;
   expression?: 'neutral' | 'win' | 'lose';
 }
 
-export function GmStage({ speaking, expression = 'neutral' }: Props) {
+export function GmStage({ speaking, analyser, syntheticSpeech, expression = 'neutral' }: Props) {
   return (
     <section className="gm-stage" aria-label="ゲームマスター">
       <div className="particle-field" aria-hidden="true">
@@ -13,7 +15,12 @@ export function GmStage({ speaking, expression = 'neutral' }: Props) {
           <span key={index} />
         ))}
       </div>
-      <GmFace speaking={speaking} expression={expression} />
+      <GmFace
+        speaking={speaking}
+        analyser={analyser}
+        syntheticSpeech={syntheticSpeech}
+        expression={expression}
+      />
       <div className={`result-aura result-aura-${expression}`} aria-hidden="true" />
     </section>
   );

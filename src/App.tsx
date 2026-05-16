@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMachine } from '@xstate/react';
 import { saveProgress, clearProgress } from './lib/storage';
+import { playVoice, type VoiceKey, type VoicePlayback } from './lib/voiceManager';
 import { gameById } from './games/registry';
 import { stringifyState, type GameDefinition } from './games/types';
 import type { NumberHuntContext } from './games/numberHunt/machine';
@@ -43,51 +44,100 @@ function describeAttachment(attachment: ChatAttachment) {
   return baseName ? `「${baseName}」` : 'お預かりした説明書';
 }
 
+function voiceKeyFromMessage(text: string): VoiceKey | 'speech' {
+  if (text === INITIAL_GREETING) return 'greet';
+  if (text.includes('確認しています')) return 'thinking';
+  if (text.includes('数字読み当て')) return 'number_intro';
+  if (text.includes('すごろく') || text.includes('双六')) return 'sugoroku_intro';
+  if (text.includes('説明書') && (text.includes('貼') || text.includes('写真'))) return 'ask_manual';
+  if (
+    text.includes('あなたの番') ||
+    text.includes('の番です') ||
+    text.includes('の手番') ||
+    text.includes('手番は') ||
+    text.includes('進める番')
+  ) {
+    return 'your_turn';
+  }
+  return 'speech';
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     { id: createId(), role: 'gm', text: INITIAL_GREETING },
   ]);
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [gmSpeaking, setGmSpeaking] = useState(true);
+  const [gmAnalyser, setGmAnalyser] = useState<AnalyserNode | null>(null);
+  const [syntheticSpeech, setSyntheticSpeech] = useState(false);
   const [expression, setExpression] = useState<'neutral' | 'win' | 'lose'>('neutral');
-  const speechTimerRef = useRef<number | null>(null);
+  const voicePlaybackRef = useRef<VoicePlayback | null>(null);
+  const voiceRequestRef = useRef(0);
   const replyTimerRef = useRef<number | null>(null);
 
   const selectedGame = selectedGameId ? gameById.get(selectedGameId) ?? null : null;
 
-  const speakFor = useCallback((text: string) => {
-    if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+  const speakFor = useCallback((text: string, explicitKey?: VoiceKey) => {
+    const requestId = voiceRequestRef.current + 1;
+    voiceRequestRef.current = requestId;
+    voicePlaybackRef.current?.stop();
+    voicePlaybackRef.current = null;
+    setGmAnalyser(null);
+    setSyntheticSpeech(false);
     setGmSpeaking(true);
-    const duration = Math.min(Math.max(text.length * 34, 1200), 4200);
-    speechTimerRef.current = window.setTimeout(() => {
-      setGmSpeaking(false);
-      speechTimerRef.current = null;
-    }, duration);
+
+    const key = explicitKey ?? voiceKeyFromMessage(text);
+    void playVoice(key, text)
+      .then((playback) => {
+        if (voiceRequestRef.current !== requestId) {
+          playback.stop();
+          return;
+        }
+
+        voicePlaybackRef.current = playback;
+        setGmAnalyser(playback.analyser);
+        setSyntheticSpeech(playback.synthetic);
+
+        void playback.ended.then(() => {
+          if (voiceRequestRef.current !== requestId) return;
+          voicePlaybackRef.current = null;
+          setGmAnalyser(null);
+          setSyntheticSpeech(false);
+          setGmSpeaking(false);
+        });
+      })
+      .catch(() => {
+        if (voiceRequestRef.current !== requestId) return;
+        setGmAnalyser(null);
+        setSyntheticSpeech(false);
+        setGmSpeaking(false);
+      });
   }, []);
 
-  const sayGm = useCallback((text: string) => {
+  const sayGm = useCallback((text: string, voiceKey?: VoiceKey) => {
     if (!text) return;
     setMessages((current) => [...current, { id: createId(), role: 'gm', text }]);
-    speakFor(text);
+    speakFor(text, voiceKey);
   }, [speakFor]);
 
   useEffect(() => {
-    speechTimerRef.current = window.setTimeout(() => {
-      setGmSpeaking(false);
-      speechTimerRef.current = null;
-    }, Math.min(Math.max(INITIAL_GREETING.length * 34, 1200), 4200));
+    const greetingTimer = window.setTimeout(() => {
+      speakFor(INITIAL_GREETING, 'greet');
+    }, 0);
     return () => {
-      if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+      window.clearTimeout(greetingTimer);
+      voiceRequestRef.current += 1;
+      voicePlaybackRef.current?.stop();
       if (replyTimerRef.current) window.clearTimeout(replyTimerRef.current);
     };
-  }, []);
+  }, [speakFor]);
 
   const resetToOpening = useCallback(() => {
     clearProgress();
     setSelectedGameId(null);
     setExpression('neutral');
     setMessages([{ id: createId(), role: 'gm', text: INITIAL_GREETING }]);
-    speakFor(INITIAL_GREETING);
+    speakFor(INITIAL_GREETING, 'greet');
   }, [speakFor]);
 
   const handleSend = (text: string, attachment?: ChatAttachment) => {
@@ -107,7 +157,7 @@ export default function App() {
     }
 
     if (attachment) {
-      sayGm('ありがとうございます。確認しています...');
+      sayGm('ありがとうございます。確認しています...', 'thinking');
       replyTimerRef.current = window.setTimeout(() => {
         sayGm(`${describeAttachment(attachment)}というゲームですね、では始めましょう。`);
         replyTimerRef.current = null;
@@ -120,7 +170,10 @@ export default function App() {
       setExpression('neutral');
       setSelectedGameId(requestedGameId);
       const gameName = gameById.get(requestedGameId)?.meta.name ?? 'そのゲーム';
-      sayGm(`${gameName}ですね。準備をお伺いします。`);
+      sayGm(
+        `${gameName}ですね。準備をお伺いします。`,
+        requestedGameId === 'sugoroku' ? 'sugoroku_intro' : 'number_intro'
+      );
       return;
     }
 
@@ -140,7 +193,12 @@ export default function App() {
 
   return (
     <div className="app">
-      <GmStage speaking={gmSpeaking} expression={expression} />
+      <GmStage
+        speaking={gmSpeaking}
+        analyser={gmAnalyser}
+        syntheticSpeech={syntheticSpeech}
+        expression={expression}
+      />
       <ChatPanel
         messages={messages}
         actionArea={
