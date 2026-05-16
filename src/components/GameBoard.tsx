@@ -1,8 +1,8 @@
-import type { GameContext, SquareKind } from '../machines/gameMachine';
-import { BOARD, BOARD_SIZE, TARGET_CRYSTALS, MAX_ROUNDS } from '../machines/gameMachine';
+import type { SugorokuContext, SquareKind } from '../games/sugoroku/machine';
+import { BOARD, BOARD_SIZE, TARGET_CRYSTALS, MAX_ROUNDS } from '../games/sugoroku/machine';
 
 interface Props {
-  context: GameContext;
+  context: SugorokuContext;
   active: boolean;
   result: SquareKind | null;
 }

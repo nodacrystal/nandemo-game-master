@@ -1,6 +1,7 @@
 const KEY = 'nandemo-gm-progress-v1';
 
 export interface SavedSnapshot {
+  gameId?: string;
   stateName: string;
   context: unknown;
   savedAt: number;

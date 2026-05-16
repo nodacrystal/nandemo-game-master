@@ -1,37 +1,31 @@
-import type { GameContext } from '../machines/gameMachine';
+import { stringifyState } from '../games/types';
+import type { NumberHuntContext } from '../games/numberHunt/machine';
+import { MAX_NUMBER, MIN_NUMBER } from '../games/numberHunt/machine';
 
 interface Props {
+  gameId: string;
   stateValue: unknown;
-  context: GameContext;
+  context: unknown;
   onStart: () => void;
   onSetPlayers: (n: number) => void;
   onNext: () => void;
   onRoll: (v: number) => void;
+  onGuess: (v: number) => void;
   onReset: () => void;
 }
 
-function pathOf(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) return '';
-    const [k, v] = entries[0];
-    const child = pathOf(v);
-    return child ? `${k}.${child}` : k;
-  }
-  return '';
-}
-
 export function ActionPanel({
+  gameId,
   stateValue,
   context,
   onStart,
   onSetPlayers,
   onNext,
   onRoll,
+  onGuess,
   onReset,
 }: Props) {
-  const path = pathOf(stateValue);
+  const path = stringifyState(stateValue);
 
   if (path === 'title') {
     return (
@@ -44,13 +38,14 @@ export function ActionPanel({
   }
 
   if (path === 'setupPlayers') {
+    const players = (context as { players: number }).players;
     return (
       <div className="action-panel">
         <div className="player-select">
           {[2, 3, 4].map((n) => (
             <button
               key={n}
-              className={`pill ${context.players === n ? 'active' : ''}`}
+              className={`pill ${players === n ? 'active' : ''}`}
               onClick={() => onSetPlayers(n)}
             >
               {n}人
@@ -64,7 +59,7 @@ export function ActionPanel({
     );
   }
 
-  if (path === 'setupBoard') {
+  if (gameId === 'sugoroku' && path === 'setupBoard') {
     return (
       <div className="action-panel">
         <button className="primary" onClick={onNext}>
@@ -74,7 +69,17 @@ export function ActionPanel({
     );
   }
 
-  if (path === 'playing.turnStart') {
+  if (gameId === 'numberHunt' && path === 'intro') {
+    return (
+      <div className="action-panel">
+        <button className="primary" onClick={onNext}>
+          最初の宣言へ
+        </button>
+      </div>
+    );
+  }
+
+  if (gameId === 'sugoroku' && path === 'playing.turnStart') {
     return (
       <div className="action-panel">
         <div className="dice-row">
@@ -88,11 +93,43 @@ export function ActionPanel({
     );
   }
 
-  if (
+  if (gameId === 'numberHunt' && path === 'guessing') {
+    const numberContext = context as NumberHuntContext;
+    const candidates = Array.from(
+      { length: numberContext.high - numberContext.low + 1 },
+      (_, i) => numberContext.low + i
+    );
+    return (
+      <div className="action-panel">
+        <div className="number-grid">
+          {candidates.map((v) => (
+            <button key={v} className="number-choice" onClick={() => onGuess(v)}>
+              {v}
+            </button>
+          ))}
+        </div>
+        <div className="number-range-note">
+          選択範囲: {Math.max(MIN_NUMBER, numberContext.low)}〜{Math.min(MAX_NUMBER, numberContext.high)}
+        </div>
+      </div>
+    );
+  }
+
+  if (gameId === 'sugoroku' && (
     path === 'playing.starHit' ||
     path === 'playing.holeHit' ||
     path === 'playing.normalHit'
-  ) {
+  )) {
+    return (
+      <div className="action-panel">
+        <button className="primary" onClick={onNext}>
+          次のプレイヤーへ
+        </button>
+      </div>
+    );
+  }
+
+  if (gameId === 'numberHunt' && path === 'hint') {
     return (
       <div className="action-panel">
         <button className="primary" onClick={onNext}>

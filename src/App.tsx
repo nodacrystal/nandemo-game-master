@@ -1,49 +1,119 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMachine } from '@xstate/react';
-import { gameMachine } from './machines/gameMachine';
-import { messageFor } from './lib/gmMessages';
 import { saveProgress, loadProgress, clearProgress } from './lib/storage';
+import { gameById, games } from './games/registry';
+import { stringifyState, type GameDefinition } from './games/types';
+import type { NumberHuntContext } from './games/numberHunt/machine';
+import type { SugorokuContext, SquareKind } from './games/sugoroku/machine';
 import { GmFace } from './components/GmFace';
 import { MessageWindow } from './components/MessageWindow';
 import { ActionPanel } from './components/ActionPanel';
 import { ControlBar } from './components/ControlBar';
 import { QuestionPanel } from './components/QuestionPanel';
 import { GameBoard } from './components/GameBoard';
+import { GameSelect } from './components/GameSelect';
+import { NumberHuntBoard } from './components/NumberHuntBoard';
 import './App.css';
 
 export default function App() {
-  const [state, send] = useMachine(gameMachine);
-  const [askResume, setAskResume] = useState(false);
+  const [initialResumeGameId] = useState(() => {
+    const saved = loadProgress();
+    return saved?.gameId && gameById.has(saved.gameId) ? saved.gameId : null;
+  });
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
+  const [askResume, setAskResume] = useState(Boolean(initialResumeGameId));
+  const [resumeGameId, setResumeGameId] = useState<string | null>(initialResumeGameId);
+
+  const selectedGame = selectedGameId ? gameById.get(selectedGameId) : null;
+
+  return (
+    <div className="app">
+      {askResume && resumeGameId && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <div className="modal-title">前回のゲームを開きますか?</div>
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  setSelectedGameId(resumeGameId);
+                  setAskResume(false);
+                }}
+              >
+                開く
+              </button>
+              <button
+                onClick={() => {
+                  clearProgress();
+                  setAskResume(false);
+                  setResumeGameId(null);
+                }}
+              >
+                開かない
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <header className="header">
+        <h1>なんでもゲームマスター</h1>
+        <div className="subtitle">
+          {selectedGame ? selectedGame.meta.name : 'ゲーム選択'}
+        </div>
+      </header>
+
+      {selectedGame ? (
+        <GamePlay
+          key={selectedGame.meta.id}
+          game={selectedGame}
+          onExit={() => {
+            clearProgress();
+            setSelectedGameId(null);
+          }}
+        />
+      ) : (
+        <GameSelect games={games.map((game) => game.meta)} onSelect={setSelectedGameId} />
+      )}
+    </div>
+  );
+}
+
+interface GamePlayProps {
+  game: GameDefinition;
+  onExit: () => void;
+}
+
+function GamePlay({ game, onExit }: GamePlayProps) {
+  const [state, send] = useMachine(game.machine);
   const [questionOpen, setQuestionOpen] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [voiceUnlocked, setVoiceUnlocked] = useState(false);
 
   useEffect(() => {
-    const saved = loadProgress();
-    if (saved) setAskResume(true);
-  }, []);
-
-  useEffect(() => {
     saveProgress({
+      gameId: game.meta.id,
       stateName: JSON.stringify(state.value),
       context: state.context,
       savedAt: Date.now(),
     });
-  }, [state.value, state.context]);
+  }, [game.meta.id, state.value, state.context]);
 
   const message = useMemo(
-    () => messageFor(state.value, state.context),
-    [state.value, state.context]
+    () => game.messageFor(state.value, state.context),
+    [game, state.value, state.context]
   );
 
   useEffect(() => {
     if (!message) return;
     if (voiceEnabled && voiceUnlocked && 'speechSynthesis' in window) return;
 
-    setSpeaking(true);
-    const t = setTimeout(() => setSpeaking(false), 1200);
-    return () => clearTimeout(t);
+    const start = setTimeout(() => setSpeaking(true), 0);
+    const stop = setTimeout(() => setSpeaking(false), 1200);
+    return () => {
+      clearTimeout(start);
+      clearTimeout(stop);
+    };
   }, [message, voiceEnabled, voiceUnlocked]);
 
   useEffect(() => {
@@ -76,12 +146,15 @@ export default function App() {
 
   const onCancel = () => {
     clearProgress();
-    send({ type: 'CANCEL' });
+    send({ type: 'CANCEL' } as never);
+    onExit();
   };
 
-  const isTitle = state.matches('title');
-  const isPlaying = state.matches('playing') || state.matches('win') || state.matches('lose');
-  const resultSquare = state.matches({ playing: 'starHit' })
+  const path = stringifyState(state.value);
+  const isResult = path === 'win' || path === 'lose';
+  const isSugoroku = game.meta.id === 'sugoroku';
+  const isNumberHunt = game.meta.id === 'numberHunt';
+  const resultSquare: SquareKind | null = state.matches({ playing: 'starHit' })
     ? 'star'
     : state.matches({ playing: 'holeHit' })
       ? 'hole'
@@ -90,82 +163,85 @@ export default function App() {
         : null;
   const expression = state.matches('win') ? 'win' : state.matches('lose') ? 'lose' : 'neutral';
 
-  return (
-    <div className="app">
-      {askResume && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <div className="modal-title">続きから遊びますか?</div>
-            <div className="modal-actions">
-              <button onClick={() => setAskResume(false)}>続きから</button>
-              <button
-                onClick={() => {
-                  clearProgress();
-                  send({ type: 'RESET' });
-                  setAskResume(false);
-                }}
-              >
-                最初から
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+  const onBack = () => {
+    if (path === 'setupPlayers') {
+      onExit();
+      return;
+    }
+    send({ type: 'BACK' } as never);
+  };
 
-      <header className="header">
-        <h1>なんでもゲームマスター</h1>
-        <div className="subtitle">12マス協力すごろく ベータ</div>
-        <button
-          className={`voice-toggle ${voiceEnabled ? 'active' : ''}`}
-          type="button"
-          onClick={() => {
-            window.speechSynthesis?.cancel();
-            setSpeaking(false);
-            setVoiceEnabled((enabled) => !enabled);
-            setVoiceUnlocked(true);
-          }}
-          aria-pressed={voiceEnabled}
-        >
-          {voiceEnabled ? '音声ON' : '音声OFF'}
-        </button>
-      </header>
+  return (
+    <>
+      <button
+        className={`voice-toggle ${voiceEnabled ? 'active' : ''}`}
+        type="button"
+        onClick={() => {
+          window.speechSynthesis?.cancel();
+          setSpeaking(false);
+          setVoiceEnabled((enabled) => !enabled);
+          setVoiceUnlocked(true);
+        }}
+        aria-pressed={voiceEnabled}
+      >
+        {voiceEnabled ? '音声ON' : '音声OFF'}
+      </button>
 
       <GmFace speaking={speaking} expression={expression} />
       <MessageWindow message={message} />
-      {!isTitle && (
-        <GameBoard context={state.context} active={isPlaying} result={resultSquare} />
+      {isSugoroku && (
+        <GameBoard
+          context={state.context as SugorokuContext}
+          active={!isResult}
+          result={resultSquare}
+        />
+      )}
+      {isNumberHunt && (
+        <NumberHuntBoard
+          context={state.context as NumberHuntContext}
+          active={!isResult}
+        />
       )}
       <ActionPanel
+        gameId={game.meta.id}
         stateValue={state.value}
         context={state.context}
-        onStart={() => send({ type: 'START' })}
-        onSetPlayers={(n) => send({ type: 'SET_PLAYERS', players: n })}
-        onNext={() => send({ type: 'NEXT' })}
-        onRoll={(v) => send({ type: 'ROLL', value: v })}
-        onReset={() => send({ type: 'RESET' })}
+        onStart={() => send({ type: 'START' } as never)}
+        onSetPlayers={(n) => send({ type: 'SET_PLAYERS', players: n } as never)}
+        onNext={() => send({ type: 'NEXT' } as never)}
+        onRoll={(v) => send({ type: 'ROLL', value: v } as never)}
+        onGuess={(v) => send({ type: 'GUESS', value: v } as never)}
+        onReset={() => send({ type: 'RESET' } as never)}
       />
 
-      {!isTitle && (
+      {isSugoroku && (
         <div className="status">
-          <span>位置: {state.context.position + 1}/12</span>
-          <span>クリスタル: {state.context.crystals}/3</span>
-          <span>ラウンド: {state.context.round}/6</span>
+          <span>位置: {(state.context as SugorokuContext).position + 1}/12</span>
+          <span>クリスタル: {(state.context as SugorokuContext).crystals}/3</span>
+          <span>ラウンド: {(state.context as SugorokuContext).round}/6</span>
+        </div>
+      )}
+      {isNumberHunt && (
+        <div className="status">
+          <span>範囲: {(state.context as NumberHuntContext).low}〜{(state.context as NumberHuntContext).high}</span>
+          <span>手番: P{(state.context as NumberHuntContext).currentPlayer}</span>
+          <span>ターン: {(state.context as NumberHuntContext).turn}/5</span>
         </div>
       )}
 
       <ControlBar
-        onBack={() => send({ type: 'BACK' })}
-        onSkip={() => send({ type: 'SKIP' })}
+        onBack={onBack}
+        onSkip={() => send({ type: 'SKIP' } as never)}
         onQuestion={() => setQuestionOpen(true)}
         onCancel={onCancel}
-        disabledBack={isTitle}
-        disabledSkip={isTitle || state.matches('win') || state.matches('lose')}
+        disabledBack={false}
+        disabledSkip={isResult}
       />
 
       <QuestionPanel
         open={questionOpen}
         onClose={() => setQuestionOpen(false)}
       />
-    </div>
+    </>
   );
 }
