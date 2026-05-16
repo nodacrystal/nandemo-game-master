@@ -15,6 +15,21 @@ import { GameSelect } from './components/GameSelect';
 import { NumberHuntBoard } from './components/NumberHuntBoard';
 import './App.css';
 
+function selectJapaneseVoice(voices: SpeechSynthesisVoice[]) {
+  const japaneseVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith('ja'));
+  const preferredNames = ['otoya', 'hattori', 'o-ren', 'oren'];
+  const namedVoice = japaneseVoices.find((voice) =>
+    preferredNames.some((name) => voice.name.toLowerCase().includes(name))
+  );
+  if (namedVoice) return namedVoice;
+
+  const maleLikeVoice = japaneseVoices.find((voice) => {
+    const name = voice.name.toLowerCase();
+    return ['male', 'man', '男性', 'otoko', 'ichiro', 'taro'].some((hint) => name.includes(hint));
+  });
+  return maleLikeVoice ?? japaneseVoices[0] ?? null;
+}
+
 export default function App() {
   const [initialResumeGameId] = useState(() => {
     const saved = loadProgress();
@@ -86,9 +101,15 @@ interface GamePlayProps {
 function GamePlay({ game, onExit }: GamePlayProps) {
   const [state, send] = useMachine(game.machine);
   const [questionOpen, setQuestionOpen] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
+  const [voiceSpeaking, setVoiceSpeaking] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const [typedMessage, setTypedMessage] = useState({ source: '', text: '' });
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [voiceUnlocked, setVoiceUnlocked] = useState(false);
+  const [voiceVolume, setVoiceVolume] = useState(0.9);
+  const [voicesRevision, setVoicesRevision] = useState(0);
+  const showVoiceVolumeControl = false;
+  const speaking = voiceSpeaking || typing;
 
   useEffect(() => {
     saveProgress({
@@ -103,16 +124,33 @@ function GamePlay({ game, onExit }: GamePlayProps) {
     () => game.messageFor(state.value, state.context),
     [game, state.value, state.context]
   );
+  const displayMessage = typedMessage.source === message ? typedMessage.text : '';
 
   useEffect(() => {
-    if (!message) return;
-    if (voiceEnabled && voiceUnlocked && 'speechSynthesis' in window) return;
+    let index = 0;
+    let timer = 0;
+    const typeSpeed = voiceEnabled && voiceUnlocked ? 38 : 26;
+    const start = window.setTimeout(() => {
+      if (!message) {
+        setTyping(false);
+        return;
+      }
 
-    const start = setTimeout(() => setSpeaking(true), 0);
-    const stop = setTimeout(() => setSpeaking(false), 1200);
+      setTyping(true);
+      setTypedMessage({ source: message, text: '' });
+      timer = window.setInterval(() => {
+        index += 1;
+        setTypedMessage({ source: message, text: message.slice(0, index) });
+        if (index >= message.length) {
+          window.clearInterval(timer);
+          setTyping(false);
+        }
+      }, typeSpeed);
+    }, 0);
+
     return () => {
-      clearTimeout(start);
-      clearTimeout(stop);
+      window.clearTimeout(start);
+      window.clearInterval(timer);
     };
   }, [message, voiceEnabled, voiceUnlocked]);
 
@@ -127,22 +165,37 @@ function GamePlay({ game, onExit }: GamePlayProps) {
   }, []);
 
   useEffect(() => {
+    if (!('speechSynthesis' in window)) return;
+
+    const refreshVoices = () => setVoicesRevision((revision) => revision + 1);
+    refreshVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', refreshVoices);
+    return () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', refreshVoices);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!message || !voiceEnabled || !voiceUnlocked || !('speechSynthesis' in window)) return;
 
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(message);
+    const voice = selectJapaneseVoice(window.speechSynthesis.getVoices());
     utterance.lang = 'ja-JP';
-    utterance.rate = 0.92;
-    utterance.pitch = 0.86;
-    utterance.onstart = () => setSpeaking(true);
-    utterance.onend = () => setSpeaking(false);
-    utterance.onerror = () => setSpeaking(false);
+    if (voice) utterance.voice = voice;
+    utterance.rate = 0.88;
+    utterance.pitch = 0.78;
+    utterance.volume = voiceVolume;
+    utterance.onstart = () => setVoiceSpeaking(true);
+    utterance.onend = () => setVoiceSpeaking(false);
+    utterance.onerror = () => setVoiceSpeaking(false);
     window.speechSynthesis.speak(utterance);
 
     return () => {
       window.speechSynthesis.cancel();
+      setVoiceSpeaking(false);
     };
-  }, [message, voiceEnabled, voiceUnlocked]);
+  }, [message, voiceEnabled, voiceUnlocked, voiceVolume, voicesRevision]);
 
   const onCancel = () => {
     clearProgress();
@@ -177,8 +230,8 @@ function GamePlay({ game, onExit }: GamePlayProps) {
         className={`voice-toggle ${voiceEnabled ? 'active' : ''}`}
         type="button"
         onClick={() => {
-          window.speechSynthesis?.cancel();
-          setSpeaking(false);
+          if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+          setVoiceSpeaking(false);
           setVoiceEnabled((enabled) => !enabled);
           setVoiceUnlocked(true);
         }}
@@ -186,9 +239,22 @@ function GamePlay({ game, onExit }: GamePlayProps) {
       >
         {voiceEnabled ? '音声ON' : '音声OFF'}
       </button>
+      {showVoiceVolumeControl && (
+        <label className="voice-volume">
+          音量
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={voiceVolume}
+            onChange={(event) => setVoiceVolume(Number(event.currentTarget.value))}
+          />
+        </label>
+      )}
 
       <GmFace speaking={speaking} expression={expression} />
-      <MessageWindow message={message} />
+      <MessageWindow message={displayMessage} speaking={speaking} />
       {isSugoroku && (
         <GameBoard
           context={state.context as SugorokuContext}

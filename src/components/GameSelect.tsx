@@ -14,6 +14,7 @@ export function GameSelect({ games, onSelect }: Props) {
       <div className="game-card-list">
         {games.map((game) => (
           <article className="game-card" key={game.id}>
+            <div className="game-card-thumb" aria-hidden="true" />
             <div>
               <h3>{game.name}</h3>
               <div className="game-card-meta">
