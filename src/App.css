@@ -105,6 +105,14 @@ button {
     drop-shadow(0 24px 42px rgba(0, 0, 0, 0.5));
 }
 
+.gm-video-figure.is-speaking {
+  animation: gm-breathe 4.8s ease-in-out infinite;
+  filter:
+    drop-shadow(0 0 calc(18px + 18px * var(--gm-audio-glow, 0)) rgba(25, 194, 212, 0.58))
+    drop-shadow(0 0 calc(30px + 22px * var(--gm-audio-glow, 0)) rgba(217, 166, 61, 0.26))
+    drop-shadow(0 24px 42px rgba(0, 0, 0, 0.5));
+}
+
 .gm-photo-frame {
   position: relative;
   width: min(88vw, 500px);
@@ -112,6 +120,19 @@ button {
   display: grid;
   place-items: center;
   overflow: visible;
+  background: transparent;
+}
+
+.gm-video-frame {
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.gm-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   background: transparent;
 }
 

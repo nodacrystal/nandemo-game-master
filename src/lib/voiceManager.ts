@@ -1,3 +1,5 @@
+import { findPlayableVideo } from './videoManager';
+
 export type VoiceKey =
   | 'greet'
   | 'ask_manual'
@@ -6,11 +8,24 @@ export type VoiceKey =
   | 'your_turn'
   | 'thinking';
 
+export type VoicePlaybackKind = 'video' | 'audio' | 'speech';
+
 export interface VoicePlayback {
+  kind: VoicePlaybackKind;
   analyser: AnalyserNode | null;
   synthetic: boolean;
+  videoSrc: string | null;
   ended: Promise<void>;
   stop: () => void;
+}
+
+export interface MediaAnalyserConnection {
+  analyser: AnalyserNode;
+  disconnect: () => void;
+}
+
+interface PlayVoiceOptions {
+  skipVideo?: boolean;
 }
 
 const voiceFiles: Record<VoiceKey, string> = {
@@ -23,6 +38,7 @@ const voiceFiles: Record<VoiceKey, string> = {
 };
 
 let audioContext: AudioContext | null = null;
+const mediaSources = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
 
 function isVoiceKey(key: string): key is VoiceKey {
   return key in voiceFiles;
@@ -31,6 +47,42 @@ function isVoiceKey(key: string): key is VoiceKey {
 function getAudioContext() {
   audioContext ??= new AudioContext();
   return audioContext;
+}
+
+export async function connectMediaElementToAnalyser(
+  media: HTMLMediaElement
+): Promise<MediaAnalyserConnection> {
+  const context = getAudioContext();
+  if (context.state === 'suspended') {
+    await context.resume();
+  }
+
+  let source = mediaSources.get(media);
+  if (!source) {
+    source = context.createMediaElementSource(media);
+    mediaSources.set(media, source);
+  }
+
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.72;
+  source.connect(analyser);
+  analyser.connect(context.destination);
+  let connected = true;
+
+  return {
+    analyser,
+    disconnect: () => {
+      if (!connected) return;
+      connected = false;
+      try {
+        source.disconnect(analyser);
+      } catch {
+        // Some browsers throw if a node was already disconnected during media cleanup.
+      }
+      analyser.disconnect();
+    },
+  };
 }
 
 function estimatedSpeechMs(text: string) {
@@ -62,8 +114,10 @@ function playSpeechSynthesis(text: string): VoicePlayback {
   });
 
   return {
+    kind: 'speech',
     analyser: null,
     synthetic: true,
+    videoSrc: null,
     ended,
     stop: () => {
       if (timeoutId) window.clearTimeout(timeoutId);
@@ -73,9 +127,41 @@ function playSpeechSynthesis(text: string): VoicePlayback {
   };
 }
 
-export async function playVoice(key: string, fallbackText = key): Promise<VoicePlayback> {
+function createVideoPlayback(videoSrc: string): VoicePlayback {
+  let settled = false;
+  let finishPlayback = () => {};
+  const ended = new Promise<void>((resolve) => {
+    finishPlayback = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+  });
+
+  return {
+    kind: 'video',
+    analyser: null,
+    synthetic: false,
+    videoSrc,
+    ended,
+    stop: finishPlayback,
+  };
+}
+
+export async function playVoice(
+  key: string,
+  fallbackText = key,
+  options: PlayVoiceOptions = {}
+): Promise<VoicePlayback> {
   if (!isVoiceKey(key)) {
     return playSpeechSynthesis(fallbackText);
+  }
+
+  if (!options.skipVideo) {
+    const videoSrc = await findPlayableVideo(key);
+    if (videoSrc) {
+      return createVideoPlayback(videoSrc);
+    }
   }
 
   const audio = new Audio(`${import.meta.env.BASE_URL}voices/${voiceFiles[key]}`);
@@ -83,17 +169,7 @@ export async function playVoice(key: string, fallbackText = key): Promise<VoiceP
   audio.crossOrigin = 'anonymous';
 
   try {
-    const context = getAudioContext();
-    if (context.state === 'suspended') {
-      await context.resume();
-    }
-
-    const source = context.createMediaElementSource(audio);
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.72;
-    source.connect(analyser);
-    analyser.connect(context.destination);
+    const connection = await connectMediaElementToAnalyser(audio);
 
     let settled = false;
     let finishPlayback = () => {};
@@ -101,6 +177,7 @@ export async function playVoice(key: string, fallbackText = key): Promise<VoiceP
       const finish = () => {
         if (settled) return;
         settled = true;
+        connection.disconnect();
         resolve();
       };
       finishPlayback = finish;
@@ -111,8 +188,10 @@ export async function playVoice(key: string, fallbackText = key): Promise<VoiceP
     await audio.play();
 
     return {
-      analyser,
+      kind: 'audio',
+      analyser: connection.analyser,
       synthetic: false,
+      videoSrc: null,
       ended,
       stop: () => {
         audio.pause();

@@ -67,52 +67,97 @@ export default function App() {
     { id: createId(), role: 'gm', text: INITIAL_GREETING },
   ]);
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
-  const [gmSpeaking, setGmSpeaking] = useState(true);
+  const [gmPlaybackState, setGmPlaybackState] = useState<'idle' | 'playingVideo' | 'speaking'>(
+    'speaking'
+  );
+  const [gmVideoSrc, setGmVideoSrc] = useState<string | null>(null);
   const [gmAnalyser, setGmAnalyser] = useState<AnalyserNode | null>(null);
   const [syntheticSpeech, setSyntheticSpeech] = useState(false);
   const [expression, setExpression] = useState<'neutral' | 'win' | 'lose'>('neutral');
   const voicePlaybackRef = useRef<VoicePlayback | null>(null);
   const voiceRequestRef = useRef(0);
   const replyTimerRef = useRef<number | null>(null);
+  const activeSpeechRef = useRef<{ key: VoiceKey | 'speech'; text: string } | null>(null);
 
   const selectedGame = selectedGameId ? gameById.get(selectedGameId) ?? null : null;
+
+  const startVoicePlayback = useCallback(
+    (key: VoiceKey | 'speech', text: string, requestId: number, skipVideo = false) => {
+      void playVoice(key, text, { skipVideo })
+        .then((playback) => {
+          if (voiceRequestRef.current !== requestId) {
+            playback.stop();
+            return;
+          }
+
+          voicePlaybackRef.current = playback;
+          setGmAnalyser(playback.analyser);
+          setSyntheticSpeech(playback.synthetic);
+
+          if (playback.kind === 'video' && playback.videoSrc) {
+            setGmVideoSrc(playback.videoSrc);
+            setGmPlaybackState('playingVideo');
+          } else {
+            setGmVideoSrc(null);
+            setGmPlaybackState('speaking');
+          }
+
+          void playback.ended.then(() => {
+            if (voiceRequestRef.current !== requestId) return;
+            voicePlaybackRef.current = null;
+            activeSpeechRef.current = null;
+            setGmVideoSrc(null);
+            setGmAnalyser(null);
+            setSyntheticSpeech(false);
+            setGmPlaybackState('idle');
+          });
+        })
+        .catch(() => {
+          if (voiceRequestRef.current !== requestId) return;
+          activeSpeechRef.current = null;
+          setGmVideoSrc(null);
+          setGmAnalyser(null);
+          setSyntheticSpeech(false);
+          setGmPlaybackState('idle');
+        });
+    },
+    []
+  );
 
   const speakFor = useCallback((text: string, explicitKey?: VoiceKey) => {
     const requestId = voiceRequestRef.current + 1;
     voiceRequestRef.current = requestId;
     voicePlaybackRef.current?.stop();
     voicePlaybackRef.current = null;
+    setGmVideoSrc(null);
     setGmAnalyser(null);
     setSyntheticSpeech(false);
-    setGmSpeaking(true);
+    setGmPlaybackState('speaking');
 
     const key = explicitKey ?? voiceKeyFromMessage(text);
-    void playVoice(key, text)
-      .then((playback) => {
-        if (voiceRequestRef.current !== requestId) {
-          playback.stop();
-          return;
-        }
+    activeSpeechRef.current = { key, text };
+    startVoicePlayback(key, text, requestId);
+  }, [startVoicePlayback]);
 
-        voicePlaybackRef.current = playback;
-        setGmAnalyser(playback.analyser);
-        setSyntheticSpeech(playback.synthetic);
-
-        void playback.ended.then(() => {
-          if (voiceRequestRef.current !== requestId) return;
-          voicePlaybackRef.current = null;
-          setGmAnalyser(null);
-          setSyntheticSpeech(false);
-          setGmSpeaking(false);
-        });
-      })
-      .catch(() => {
-        if (voiceRequestRef.current !== requestId) return;
-        setGmAnalyser(null);
-        setSyntheticSpeech(false);
-        setGmSpeaking(false);
-      });
+  const handleVideoEnded = useCallback(() => {
+    if (voicePlaybackRef.current?.kind !== 'video') return;
+    voicePlaybackRef.current.stop();
   }, []);
+
+  const handleVideoError = useCallback(() => {
+    if (voicePlaybackRef.current?.kind !== 'video' || !activeSpeechRef.current) return;
+
+    const { key, text } = activeSpeechRef.current;
+    const requestId = voiceRequestRef.current + 1;
+    voiceRequestRef.current = requestId;
+    voicePlaybackRef.current.stop();
+    voicePlaybackRef.current = null;
+    setGmVideoSrc(null);
+    setGmAnalyser(null);
+    setSyntheticSpeech(false);
+    setGmPlaybackState('speaking');
+    startVoicePlayback(key, text, requestId, true);
+  }, [startVoicePlayback]);
 
   const sayGm = useCallback((text: string, voiceKey?: VoiceKey) => {
     if (!text) return;
@@ -194,10 +239,14 @@ export default function App() {
   return (
     <div className="app">
       <GmStage
-        speaking={gmSpeaking}
+        playbackState={gmPlaybackState}
+        videoSrc={gmVideoSrc}
         analyser={gmAnalyser}
         syntheticSpeech={syntheticSpeech}
         expression={expression}
+        onVideoAnalyser={setGmAnalyser}
+        onVideoEnded={handleVideoEnded}
+        onVideoError={handleVideoError}
       />
       <ChatPanel
         messages={messages}
